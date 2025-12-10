@@ -3,8 +3,7 @@ import { CommonModule } from '@angular/common';
 import { ActivatedRoute } from '@angular/router';
 import { Client, IMessage } from '@stomp/stompjs';
 import { ApiService } from '../services/api.service';
-
-const WS_URL = 'http://localhost:8087/ws';
+import { environment } from '../../environments/environment';
 
 @Component({
   selector: 'app-room',
@@ -81,7 +80,7 @@ export class RoomComponent implements OnInit, OnDestroy {
   private async connectSignaling() {
     const SockJS = (await import('sockjs-client')).default;
     this.stomp = new Client({
-      webSocketFactory: () => new SockJS(WS_URL) as any,
+      webSocketFactory: () => new SockJS(environment.wsUrl) as any,
       reconnectDelay: 2000
     });
     this.stomp.onConnect = () => {
