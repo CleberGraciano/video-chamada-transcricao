@@ -2,7 +2,7 @@ import { Component } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { HttpClient } from '@angular/common/http';
 
-const API_BASE = 'http://localhost:8080';
+const API_BASE = 'http://localhost:8087';
 
 @Component({
   selector: 'app-home',

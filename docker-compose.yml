@@ -1,0 +1,20 @@
+version: '3.9'
+services:
+  backend:
+    build:
+      context: ./video-meet-backend
+    image: video-meet-backend:local
+    ports:
+      - "8087:8087"
+    environment:
+      - SERVER_PORT=8087
+      - APP_FRONTEND_BASE_URL=http://localhost:84
+
+  frontend:
+    build:
+      context: ./video-meet-frontend
+    image: video-meet-frontend:local
+    depends_on:
+      - backend
+    ports:
+      - "84:84"

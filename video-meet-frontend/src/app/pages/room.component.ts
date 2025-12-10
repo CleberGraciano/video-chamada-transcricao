@@ -4,7 +4,7 @@ import { ActivatedRoute } from '@angular/router';
 import { Client, IMessage } from '@stomp/stompjs';
 import { ApiService } from '../services/api.service';
 
-const WS_URL = 'http://localhost:8080/ws';
+const WS_URL = 'http://localhost:8087/ws';
 
 @Component({
   selector: 'app-room',
@@ -49,6 +49,8 @@ export class RoomComponent implements OnInit, OnDestroy {
   transcript = '';
   transcribing = false;
   downloadUrl = '';
+  private ready = false;
+  private peerReadyFromRemote = false;
 
   private pc?: RTCPeerConnection;
   private localStream?: MediaStream;
@@ -104,7 +106,8 @@ export class RoomComponent implements OnInit, OnDestroy {
     if (this.inCall) return;
     await this.setupMedia();
     this.createPeer();
-    // We will only create offer when we see a 'join' with ordering tie-breaker
+    this.ready = true;
+    this.send({ type: 'ready' });
     this.inCall = true;
   }
 
@@ -115,13 +118,7 @@ export class RoomComponent implements OnInit, OnDestroy {
 
     this.localStream?.getTracks().forEach(track => this.pc!.addTrack(track, this.localStream!));
 
-    this.pc.onnegotiationneeded = async () => {
-      try {
-        await this.makeOffer();
-      } catch (e) {
-        console.warn('Negotiation failed', e);
-      }
-    };
+    // negotiation will be triggered explicitly via 'ready' messages
 
     this.pc.onicecandidate = (e) => {
       if (e.candidate) {
@@ -147,9 +144,12 @@ export class RoomComponent implements OnInit, OnDestroy {
 
     switch (data.type) {
       case 'join': {
-        // When someone joins, the lexicographically smaller id sends an offer
-        if (this.clientId < (data.sender || '')) {
-          // Ensure we have a peer and local media; if not in a call, still offer receive-only
+        // Wait for 'ready' to avoid glare; no immediate offer on join
+        break;
+      }
+      case 'ready': {
+        this.peerReadyFromRemote = true;
+        if (this.ready && this.clientId < (data.sender || '')) {
           if (!this.pc) this.createPeer();
           await this.makeOffer();
         }

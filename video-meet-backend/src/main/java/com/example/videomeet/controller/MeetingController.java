@@ -2,6 +2,7 @@ package com.example.videomeet.controller;
 
 import com.example.videomeet.model.Meeting;
 import com.example.videomeet.service.MeetingService;
+import org.springframework.beans.factory.annotation.Value;
 import jakarta.validation.constraints.NotBlank;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -13,6 +14,8 @@ import java.util.Map;
 @CrossOrigin(origins = {"http://localhost:4200", "*"})
 public class MeetingController {
     private final MeetingService meetingService;
+    @Value("${app.frontendBaseUrl:http://localhost:4200}")
+    private String frontendBaseUrl;
 
     public MeetingController(MeetingService meetingService) {
         this.meetingService = meetingService;
@@ -21,9 +24,13 @@ public class MeetingController {
     @PostMapping
     public ResponseEntity<?> create() {
         Meeting m = meetingService.create();
+        String base = frontendBaseUrl;
+        if (base.endsWith("/")) {
+            base = base.substring(0, base.length() - 1);
+        }
         return ResponseEntity.ok(Map.of(
                 "id", m.getId(),
-                "joinUrl", "http://localhost:4200/room/" + m.getId()
+                "joinUrl", base + "/room/" + m.getId()
         ));
     }
 
