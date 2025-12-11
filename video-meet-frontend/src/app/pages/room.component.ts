@@ -12,19 +12,23 @@ import { environment } from '../../environments/environment';
   template: `
   <div class="card">
     <h2>Sala: {{ roomId }}</h2>
-    <div class="row">
-      <div class="col video-box">
-        <div class="badge">Você</div>
-        <video #localVideo autoplay playsinline muted></video>
+    <div class="stage" [class.expanded]="expanded">
+      <!-- Primary video (who is large) -->
+      <div class="primary" (click)="togglePrimary()">
+        <div class="badge">{{ primaryIsRemote ? 'Remoto' : 'Você' }}</div>
+        <video #primaryVideo autoplay playsinline [muted]="!primaryIsRemote"></video>
       </div>
-      <div class="col video-box">
-        <div class="badge">Remoto</div>
-        <video #remoteVideo autoplay playsinline></video>
+      <!-- Picture-in-picture thumbnail (bottom-right) -->
+      <div class="pip" [class.hidden]="pipHidden" (click)="togglePrimary()">
+        <div class="badge">{{ primaryIsRemote ? 'Você' : 'Remoto' }}</div>
+        <video #pipVideo autoplay playsinline [muted]="primaryIsRemote"></video>
       </div>
     </div>
     <div class="controls">
       <button class="primary" (click)="startCall()" [disabled]="inCall">Iniciar</button>
       <button (click)="toggleMute()">{{ muted ? 'Desmutar' : 'Mutar' }}</button>
+      <button (click)="pipHidden = !pipHidden">{{ pipHidden ? 'Mostrar miniatura' : 'Ocultar miniatura' }}</button>
+      <button (click)="expanded = !expanded">{{ expanded ? 'Reduzir' : 'Expandir' }}</button>
       <a [href]="downloadUrl" target="_blank"><button>Baixar transcrição</button></a>
       <button class="danger" (click)="hangup()" [disabled]="!inCall">Encerrar</button>
     </div>
@@ -58,9 +62,14 @@ export class RoomComponent implements OnInit, OnDestroy {
   private polite = false; // simple tie-breaker
   speechSupported = 'webkitSpeechRecognition' in (window as any) || 'SpeechRecognition' in (window as any);
   private recognizer?: any;
+  primaryIsRemote = true; // large is remote by default
+  pipHidden = false;
+  expanded = false;
 
-  @ViewChild('localVideo', { static: true }) localVideo!: ElementRef<HTMLVideoElement>;
-  @ViewChild('remoteVideo', { static: true }) remoteVideo!: ElementRef<HTMLVideoElement>;
+  @ViewChild('localVideo', { static: false }) localVideo!: ElementRef<HTMLVideoElement>;
+  @ViewChild('remoteVideo', { static: false }) remoteVideo!: ElementRef<HTMLVideoElement>;
+  @ViewChild('primaryVideo', { static: true }) primaryVideo!: ElementRef<HTMLVideoElement>;
+  @ViewChild('pipVideo', { static: true }) pipVideo!: ElementRef<HTMLVideoElement>;
 
   constructor(private route: ActivatedRoute, private api: ApiService) {}
 
@@ -93,7 +102,9 @@ export class RoomComponent implements OnInit, OnDestroy {
   private async setupMedia() {
     try {
       this.localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-      this.localVideo.nativeElement.srcObject = this.localStream;
+      // assign to appropriate element depending on current primary
+      const localEl = this.primaryIsRemote ? this.pipVideo.nativeElement : this.primaryVideo.nativeElement;
+      localEl.srcObject = this.localStream;
     } catch (err: any) {
       console.error('Erro ao acessar câmera/microfone', err);
       alert('Não foi possível acessar a câmera/microfone. Verifique as permissões do navegador.');
@@ -113,7 +124,8 @@ export class RoomComponent implements OnInit, OnDestroy {
   private createPeer() {
     this.pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
     this.remoteStream = new MediaStream();
-    this.remoteVideo.nativeElement.srcObject = this.remoteStream;
+    const remoteEl = this.primaryIsRemote ? this.primaryVideo.nativeElement : this.pipVideo.nativeElement;
+    remoteEl.srcObject = this.remoteStream;
 
     this.localStream?.getTracks().forEach(track => this.pc!.addTrack(track, this.localStream!));
 
@@ -164,12 +176,29 @@ export class RoomComponent implements OnInit, OnDestroy {
       }
       case 'answer': {
         await this.pc?.setRemoteDescription(new RTCSessionDescription(data.sdp));
+        // ensure remote stream is attached
+        const remoteEl = this.primaryIsRemote ? this.primaryVideo.nativeElement : this.pipVideo.nativeElement;
+        remoteEl.srcObject = this.remoteStream as MediaStream;
         break;
       }
       case 'candidate': {
         try { await this.pc?.addIceCandidate(new RTCIceCandidate(data.candidate)); } catch {}
         break;
       }
+    }
+  }
+
+  togglePrimary() {
+    // swap which stream is large vs small
+    this.primaryIsRemote = !this.primaryIsRemote;
+    // reassign srcObjects
+    if (this.localStream) {
+      const localEl = this.primaryIsRemote ? this.pipVideo.nativeElement : this.primaryVideo.nativeElement;
+      localEl.srcObject = this.localStream;
+    }
+    if (this.remoteStream) {
+      const remoteEl = this.primaryIsRemote ? this.primaryVideo.nativeElement : this.pipVideo.nativeElement;
+      remoteEl.srcObject = this.remoteStream;
     }
   }
 
