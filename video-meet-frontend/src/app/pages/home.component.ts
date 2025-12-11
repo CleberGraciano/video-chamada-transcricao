@@ -1,5 +1,6 @@
 import { Component } from '@angular/core';
 import { CommonModule } from '@angular/common';
+import { FormsModule } from '@angular/forms';
 import { HttpClient } from '@angular/common/http';
 import { environment } from 'src/environments/environment';
 
@@ -8,7 +9,7 @@ const API_BASE = environment.apiBaseUrl;
 @Component({
   selector: 'app-home',
   standalone: true,
-  imports: [CommonModule],
+  imports: [CommonModule, FormsModule],
   template: `
   <div class="card">
     <h2>Criar nova reunião</h2>
@@ -25,19 +26,37 @@ const API_BASE = environment.apiBaseUrl;
       </div>
     </div>
   </div>
+
+  <div class="card">
+    <h3>Configurar limite de participantes</h3>
+    <p>Defina o limite máximo de participantes permitidos na sala.</p>
+    <div class="controls">
+      <input type="number" min="1" [(ngModel)]="participantLimit" placeholder="Limite">
+      <button (click)="applyLimit()" [disabled]="!meetingId">Aplicar limite</button>
+    </div>
+    <p *ngIf="limitApplied" class="badge">Limite aplicado: {{ participantLimit }}</p>
+  </div>
   `
 })
 export class HomeComponent {
   loading = false;
   joinUrl = '';
   meetingId = '';
+  participantLimit = 2;
+  limitApplied = false;
   constructor(private http: HttpClient) {}
 
   createMeeting() {
     this.loading = true;
-    this.http.post<{id:string; joinUrl:string}>(`${API_BASE}/api/meetings`, {})
+    this.http.post<{id:string; joinUrl:string}>(`${environment.apiBaseUrl}/api/meetings`, {})
       .subscribe({
-        next: (res) => { this.joinUrl = res.joinUrl; this.meetingId = res.id; },
+        next: (res) => {
+          this.joinUrl = res.joinUrl;
+          this.meetingId = res.id;
+          // auto-apply limit of 2
+          this.http.post(`${environment.apiBaseUrl}/api/meetings/${this.meetingId}/limit`, { limit: this.participantLimit })
+            .subscribe({ next: () => this.limitApplied = true, error: e => console.warn('Falha ao aplicar limite automaticamente', e) });
+        },
         error: (e) => alert('Erro ao criar reunião: ' + (e?.message || e)),
         complete: () => this.loading = false
       });
@@ -47,5 +66,10 @@ export class HomeComponent {
     if (!this.joinUrl) return;
     await navigator.clipboard.writeText(this.joinUrl);
     alert('Link copiado!');
+  }
+  applyLimit() {
+    if (!this.meetingId) return;
+    this.http.post(`${environment.apiBaseUrl}/api/meetings/${this.meetingId}/limit`, { limit: this.participantLimit })
+      .subscribe({ next: () => this.limitApplied = true, error: e => alert('Erro ao aplicar limite: ' + (e?.message || e)) });
   }
 }

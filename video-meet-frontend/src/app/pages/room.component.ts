@@ -1,4 +1,4 @@
-import { Component, ElementRef, OnDestroy, OnInit, ViewChild } from '@angular/core';
+import { Component, ElementRef, OnDestroy, OnInit, ViewChild, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ActivatedRoute } from '@angular/router';
 import { Client, IMessage } from '@stomp/stompjs';
@@ -12,6 +12,8 @@ import { environment } from '../../environments/environment';
   template: `
   <div class="card">
     <h2>Sala: {{ roomId }}</h2>
+    <p *ngIf="roomFull" class="badge">Sala cheia (2/2)</p>
+    <div *ngIf="fullMessage" class="toast">{{ fullMessage }}</div>
     <div class="stage" [class.expanded]="expanded">
       <!-- Primary video (who is large) -->
       <div class="primary" (click)="togglePrimary()">
@@ -22,6 +24,13 @@ import { environment } from '../../environments/environment';
       <div class="pip" [class.hidden]="pipHidden" (click)="togglePrimary()">
         <div class="badge">{{ primaryIsRemote ? 'Você' : 'Remoto' }}</div>
         <video #pipVideo autoplay playsinline [muted]="primaryIsRemote"></video>
+      </div>
+    </div>
+    <!-- Thumbnails (hidden when limit=2 and remote is focused) -->
+    <div class="thumbs" *ngIf="displayedThumbs.length && !hideThumbsForTwo()">
+      <div class="thumb" *ngFor="let t of displayedThumbs" (click)="focusRemote(t.id)">
+        <span class="badge">{{ t.label }}</span>
+        <video [id]="'thumb_'+t.id" autoplay playsinline></video>
       </div>
     </div>
     <div class="controls">
@@ -52,13 +61,22 @@ export class RoomComponent implements OnInit, OnDestroy {
   transcript = '';
   transcribing = false;
   downloadUrl = '';
+  roomFull = false;
+  fullMessage = '';
   private ready = false;
   private peerReadyFromRemote = false;
 
   private pc?: RTCPeerConnection;
   private localStream?: MediaStream;
-  private remoteStream?: MediaStream;
   private stomp?: Client;
+  private pcs: Map<string, RTCPeerConnection> = new Map();
+  private remoteStreams: Map<string, MediaStream> = new Map();
+  remoteThumbs: { id: string; label: string }[] = [];
+  get displayedThumbs() { return this.remoteThumbs.slice(0, 1); }
+  hideThumbsForTwo(): boolean {
+    // When room limit is 2, hide thumbnails if remote is focused
+    return this.primaryIsRemote && this.displayedThumbs.length > 0;
+  }
   private polite = false; // simple tie-breaker
   speechSupported = 'webkitSpeechRecognition' in (window as any) || 'SpeechRecognition' in (window as any);
   private recognizer?: any;
@@ -71,12 +89,15 @@ export class RoomComponent implements OnInit, OnDestroy {
   @ViewChild('primaryVideo', { static: true }) primaryVideo!: ElementRef<HTMLVideoElement>;
   @ViewChild('pipVideo', { static: true }) pipVideo!: ElementRef<HTMLVideoElement>;
 
-  constructor(private route: ActivatedRoute, private api: ApiService) {}
+  private route = inject(ActivatedRoute);
+  constructor(private api: ApiService) {}
 
   ngOnInit(): void {
     this.roomId = this.route.snapshot.paramMap.get('id') || '';
     this.downloadUrl = this.api.transcriptDownloadUrl(this.roomId);
     this.connectSignaling();
+    // Ensure slot is freed if the tab/window closes
+    window.addEventListener('beforeunload', this.onBeforeUnload);
   }
 
   ngOnDestroy(): void {
@@ -84,7 +105,21 @@ export class RoomComponent implements OnInit, OnDestroy {
     this.stomp?.deactivate();
     this.pc?.close();
     this.localStream?.getTracks().forEach(t => t.stop());
+    window.removeEventListener('beforeunload', this.onBeforeUnload);
+    // Attempt to leave on destroy as a fallback
+    this.api.leaveRoom(this.roomId, this.clientId).subscribe({ next: () => {}, error: () => {} });
   }
+
+  private onBeforeUnload = (e: BeforeUnloadEvent) => {
+    try {
+      navigator.sendBeacon?.(
+        `${environment.apiBaseUrl}/api/rooms/${this.roomId}/leave`,
+        new Blob([JSON.stringify({ clientId: this.clientId })], { type: 'application/json' })
+      );
+    } catch {
+      // best effort; ignore errors
+    }
+  };
 
   private async connectSignaling() {
     const SockJS = (await import('sockjs-client')).default;
@@ -115,38 +150,48 @@ export class RoomComponent implements OnInit, OnDestroy {
   async startCall() {
     if (this.inCall) return;
     await this.setupMedia();
-    this.createPeer();
+    const joinRes: any = await this.api.joinRoom(this.roomId, this.clientId).toPromise().catch(e => {
+      alert(e?.error?.reason || 'Erro ao entrar na sala');
+      throw e;
+    });
+    if (!joinRes?.allowed) {
+      this.roomFull = true;
+      this.showFullToast('Sala cheia: limite de 2 participantes atingido.');
+      return;
+    }
     this.ready = true;
     this.send({ type: 'ready' });
     this.inCall = true;
   }
 
-  private createPeer() {
-    this.pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
-    this.remoteStream = new MediaStream();
-    const remoteEl = this.primaryIsRemote ? this.primaryVideo.nativeElement : this.pipVideo.nativeElement;
-    remoteEl.srcObject = this.remoteStream;
-
-    this.localStream?.getTracks().forEach(track => this.pc!.addTrack(track, this.localStream!));
-
-    // negotiation will be triggered explicitly via 'ready' messages
-
-    this.pc.onicecandidate = (e) => {
-      if (e.candidate) {
-        this.send({ type: 'candidate', candidate: e.candidate });
-      }
+  private createPeerFor(remoteId: string) {
+    const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+    // Add local tracks
+    this.localStream?.getTracks().forEach(track => pc.addTrack(track, this.localStream!));
+    pc.onicecandidate = (e) => { if (e.candidate) this.send({ type: 'candidate', candidate: e.candidate, target: remoteId }); };
+    pc.ontrack = (e) => {
+      const incoming = e.streams[0];
+      // Store and attach incoming stream
+      this.remoteStreams.set(remoteId, incoming);
+      const remoteEl = this.primaryIsRemote ? this.primaryVideo.nativeElement : this.pipVideo.nativeElement;
+      remoteEl.srcObject = incoming;
+      // also attach to thumbnail element
+      queueMicrotask(() => {
+        const el = document.getElementById('thumb_' + remoteId) as HTMLVideoElement | null;
+        if (el) el.srcObject = incoming;
+      });
+      this.addOrUpdateThumb(remoteId);
     };
-
-    this.pc.ontrack = (e) => {
-      e.streams[0].getTracks().forEach(t => this.remoteStream!.addTrack(t));
-    };
+    this.pcs.set(remoteId, pc);
+    return pc;
   }
 
-  private async makeOffer() {
-    if (!this.pc) this.createPeer();
-    const offer = await this.pc!.createOffer();
-    await this.pc!.setLocalDescription(offer);
-    this.send({ type: 'offer', sdp: offer });
+  private async makeOffer(remoteId: string) {
+    let pc = this.pcs.get(remoteId);
+    if (!pc) pc = this.createPeerFor(remoteId);
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    this.send({ type: 'offer', sdp: offer, target: remoteId });
   }
 
   private async onSignal(msg: IMessage) {
@@ -155,37 +200,84 @@ export class RoomComponent implements OnInit, OnDestroy {
 
     switch (data.type) {
       case 'join': {
-        // Wait for 'ready' to avoid glare; no immediate offer on join
+        // New participant joined; if we're ready, proactively offer to them
+        if (this.ready && data.sender) {
+          await this.makeOffer(data.sender);
+        }
         break;
       }
       case 'ready': {
         this.peerReadyFromRemote = true;
-        if (this.ready && this.clientId < (data.sender || '')) {
-          if (!this.pc) this.createPeer();
-          await this.makeOffer();
+        // Proactively offer upon ready to reduce connection time
+        if (this.ready && data.sender) {
+          await this.makeOffer(data.sender);
         }
         break;
       }
       case 'offer': {
-        if (!this.pc) this.createPeer();
-        await this.pc!.setRemoteDescription(new RTCSessionDescription(data.sdp));
-        const answer = await this.pc!.createAnswer();
-        await this.pc!.setLocalDescription(answer);
-        this.send({ type: 'answer', sdp: answer });
+        const from = data.sender;
+        let pc = this.pcs.get(from);
+        if (!pc) pc = this.createPeerFor(from);
+        await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        this.send({ type: 'answer', sdp: answer, target: from });
         break;
       }
       case 'answer': {
-        await this.pc?.setRemoteDescription(new RTCSessionDescription(data.sdp));
-        // ensure remote stream is attached
-        const remoteEl = this.primaryIsRemote ? this.primaryVideo.nativeElement : this.pipVideo.nativeElement;
-        remoteEl.srcObject = this.remoteStream as MediaStream;
+        const from = data.sender;
+        const pc = this.pcs.get(from);
+        await pc?.setRemoteDescription(new RTCSessionDescription(data.sdp));
+        this.addOrUpdateThumb(from);
         break;
       }
       case 'candidate': {
-        try { await this.pc?.addIceCandidate(new RTCIceCandidate(data.candidate)); } catch {}
+        const from = data.sender;
+        const pc = this.pcs.get(data.target || from);
+        try { await pc?.addIceCandidate(new RTCIceCandidate(data.candidate)); } catch {}
+        break;
+      }
+      case 'leave': {
+        const from = data.sender;
+        this.removePeer(from);
         break;
       }
     }
+  }
+
+  private addOrUpdateThumb(id: string) {
+    if (!this.remoteThumbs.find(t => t.id === id)) {
+      this.remoteThumbs.push({ id, label: 'Remoto' });
+    }
+    // ensure thumbnail video attaches
+    const stream = this.remoteStreams.get(id);
+    if (stream) {
+      const el = document.getElementById('thumb_' + id) as HTMLVideoElement | null;
+      if (el) el.srcObject = stream;
+    }
+  }
+
+  focusRemote(id: string) {
+    // make selected remote the primary view
+    this.primaryIsRemote = true;
+    const stream = this.remoteStreams.get(id);
+    if (stream) {
+      this.primaryVideo.nativeElement.srcObject = stream;
+      // local stays in PiP
+      if (this.localStream) this.pipVideo.nativeElement.srcObject = this.localStream;
+    }
+  }
+
+  private removePeer(id: string) {
+    const pc = this.pcs.get(id);
+    pc?.close();
+    this.pcs.delete(id);
+    const s = this.remoteStreams.get(id);
+    if (s) {
+      s.getTracks().forEach(t => t.stop());
+      this.remoteStreams.delete(id);
+    }
+    this.remoteThumbs = this.remoteThumbs.filter(t => t.id !== id);
   }
 
   togglePrimary() {
@@ -196,14 +288,29 @@ export class RoomComponent implements OnInit, OnDestroy {
       const localEl = this.primaryIsRemote ? this.pipVideo.nativeElement : this.primaryVideo.nativeElement;
       localEl.srcObject = this.localStream;
     }
-    if (this.remoteStream) {
+    const r = this.getFirstRemoteStream();
+    if (r) {
       const remoteEl = this.primaryIsRemote ? this.primaryVideo.nativeElement : this.pipVideo.nativeElement;
-      remoteEl.srcObject = this.remoteStream;
+      remoteEl.srcObject = r;
     }
+  }
+
+  private getFirstRemoteStream(): MediaStream | undefined {
+    const iter = this.remoteStreams.keys();
+    const first = iter.next();
+    if (!first.done) {
+      return this.remoteStreams.get(first.value);
+    }
+    return undefined;
   }
 
   private send(payload: any) {
     this.stomp?.publish({ destination: `/app/room/${this.roomId}`, body: JSON.stringify({ ...payload, sender: this.clientId }) });
+  }
+
+  private showFullToast(message: string) {
+    this.fullMessage = message;
+    setTimeout(() => { this.fullMessage = ''; }, 4000);
   }
 
   toggleMute() {
@@ -213,11 +320,15 @@ export class RoomComponent implements OnInit, OnDestroy {
 
   async hangup() {
     this.inCall = false;
-    this.pc?.close();
-    this.pc = undefined;
+    // notify others and free slot
+    this.send({ type: 'leave' });
+    this.pcs.forEach(pc => pc.close());
+    this.pcs.clear();
     this.remoteVideo.nativeElement.srcObject = null;
     this.localStream?.getTracks().forEach(t => t.stop());
     this.localStream = undefined;
+    // call REST leave
+    try { await this.api.leaveRoom(this.roomId, this.clientId).toPromise(); } catch {}
   }
 
   toggleTranscription() {

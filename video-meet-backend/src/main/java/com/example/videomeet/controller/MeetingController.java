@@ -40,4 +40,13 @@ public class MeetingController {
                 .<ResponseEntity<?>>map(m -> ResponseEntity.ok(Map.of("id", m.getId(), "createdAt", m.getCreatedAt())))
                 .orElse(ResponseEntity.notFound().build());
     }
+
+    public record LimitRequest(int limit) {}
+
+    @PostMapping("/{id}/limit")
+    public ResponseEntity<?> setLimit(@PathVariable String id, @RequestBody LimitRequest req) {
+        if (meetingService.get(id).isEmpty()) return ResponseEntity.notFound().build();
+        meetingService.setLimit(id, req.limit());
+        return ResponseEntity.ok(Map.of("id", id, "limit", meetingService.getLimit(id)));
+    }
 }

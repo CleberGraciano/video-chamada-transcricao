@@ -8,3 +8,10 @@
 .stage .pip.hidden{display:none}
 .stage .pip video{width:100%; height:auto; display:block; border-radius:10px}
 .stage .badge{position:absolute; left:12px; top:12px}
+/* Thumbnails row */
+.thumbs{display:flex; gap:12px; margin-top:12px; flex-wrap:wrap}
+.thumb{position:relative; width:180px; background:#000; border-radius:10px; border:1px solid #1f2937; cursor:pointer}
+.thumb video{width:100%; display:block; border-radius:10px}
+.thumb .badge{position:absolute; left:8px; top:8px}
+/* Lightweight toast styling */
+.toast{position:fixed; right:16px; bottom:16px; background:rgba(30,30,40,.95); color:#e6e6f0; padding:10px 14px; border-radius:8px; box-shadow:0 6px 18px rgba(0,0,0,.3); z-index:1000}
